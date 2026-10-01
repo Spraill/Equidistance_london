@@ -130,11 +130,12 @@
   const map = L.map("map", { zoomControl: true, attributionControl: true, zoomSnap: 0.25, tap: false }).setView([51.507, -0.1278], 12);
   map.zoomControl.setPosition("bottomright");
   map.attributionControl.setPrefix(false);
-  for (const [name, z] of [["basemap", 150], ["network", 330], ["heat", 340], ["crow", 360], ["routes", 420], ["casing", 410]]) {
+  for (const [name, z] of [["basemap", 150], ["network", 330], ["heat", 340], ["crow", 360], ["labels", 380], ["routes", 420], ["casing", 410]]) {
     map.createPane(name).style.zIndex = z;
   }
   map.getPane("heat").style.pointerEvents = "none";
   map.getPane("network").style.pointerEvents = "none";
+  map.getPane("labels").style.pointerEvents = "none";
 
   // Hand-drawn base: boroughs and the Thames, visible wherever map tiles fail to load.
   const basemap = L.layerGroup().addTo(map);
@@ -163,13 +164,208 @@
     const t = document.documentElement.getAttribute("data-theme");
     return t ? t === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
   };
-  // OpenStreetMap's standard tiles; dark mode is a CSS filter on the tile pane (see styles.css).
-  L.tileLayer(CFG.tileUrl || "https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution: CFG.tileAttribution || '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-  }).addTo(map);
-  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => drawNetwork());
-  new MutationObserver(() => drawNetwork()).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  // Street map: OpenStreetMap's standard tiles (as Pub_gen uses), then a second OSM tile
+  // server, then, if neither can be reached, Halfway House's own labelled map.
+  // Dark mode is a CSS filter on the tile pane (see styles.css).
+  const OSM_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+  const TILE_SOURCES = [
+    { url: CFG.tileUrl || "https://tile.openstreetmap.org/{z}/{x}/{y}.png", attribution: CFG.tileAttribution || OSM_ATTR },
+    { url: "https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png", subdomains: "abc", attribution: `${OSM_ATTR}, tiles by <a href="https://www.hotosm.org/">HOT</a> and <a href="https://openstreetmap.fr/">OSM France</a>` },
+  ];
+  let tileLayer = null, tileSource = 0, tileLoads = 0, tileErrors = 0, offlineMap = false;
+  function useTiles(i) {
+    if (tileLayer) map.removeLayer(tileLayer);
+    tileSource = i; tileLoads = 0; tileErrors = 0;
+    const src = TILE_SOURCES[i];
+    tileLayer = L.tileLayer(src.url, { maxZoom: 19, subdomains: src.subdomains || "abc", attribution: src.attribution }).addTo(map);
+    tileLayer.on("tileload", () => { tileLoads++; if (offlineMap) setOfflineMap(false); });
+    tileLayer.on("tileerror", () => {
+      tileErrors++;
+      if (tileLoads || tileErrors < 4) return;
+      if (tileSource + 1 < TILE_SOURCES.length) useTiles(tileSource + 1);
+      else { map.removeLayer(tileLayer); tileLayer = null; setOfflineMap(true); }
+    });
+  }
+  useTiles(0);
+  setTimeout(() => { if (!tileLoads) setOfflineMap(true); }, 7000);
+
+  function setOfflineMap(on) {
+    if (on === offlineMap) return;
+    offlineMap = on;
+    document.documentElement.classList.toggle("map-offline", on);
+    $("#mapNote").hidden = !on;
+    if (on) loadLabels().then(() => { if (offlineMap) labelLayer.addTo(map); });
+    else if (map.hasLayer(labelLayer)) map.removeLayer(labelLayer);
+  }
+
+  let labelsPromise = null;
+  function loadLabels() {
+    if (window.HH_LABELS) return Promise.resolve();
+    if (!labelsPromise) {
+      labelsPromise = new Promise((resolve) => {
+        const sc = document.createElement("script");
+        sc.src = "data/labels.js";
+        sc.onload = resolve;
+        sc.onerror = resolve;
+        document.head.appendChild(sc);
+      });
+    }
+    return labelsPromise;
+  }
+
+  // ---------------------------------------------------------------- labelled fallback map
+
+  // Place names drawn on a canvas, more of them as you zoom in: boroughs, then neighbourhoods,
+  // stations, parks and museums, streets, and finally pubs. Labels never overlap.
+  const LabelLayer = L.Layer.extend({
+    onAdd(m) {
+      this._canvas = L.DomUtil.create("canvas", "hh-labels");
+      m.getPane("labels").appendChild(this._canvas);
+      m.on("moveend zoomend resize viewreset", this._redraw, this);
+      m.on("zoomstart", this._hide, this);
+      this._redraw();
+    },
+    onRemove(m) {
+      L.DomUtil.remove(this._canvas);
+      m.off("moveend zoomend resize viewreset", this._redraw, this);
+      m.off("zoomstart", this._hide, this);
+    },
+    _hide() { if (this._canvas) this._canvas.style.visibility = "hidden"; },
+    _redraw() {
+      const m = this._map;
+      if (!m) return;
+      const size = m.getSize();
+      const dpr = window.devicePixelRatio || 1;
+      const cv = this._canvas;
+      cv.width = size.x * dpr; cv.height = size.y * dpr;
+      cv.style.width = size.x + "px"; cv.style.height = size.y + "px";
+      L.DomUtil.setPosition(cv, m.containerPointToLayerPoint([0, 0]));
+      cv.style.visibility = "visible";
+      const ctx = cv.getContext("2d");
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawLabels(ctx, m, size);
+    },
+  });
+  const labelLayer = new LabelLayer();
+
+  let labelIndex = null;
+  function buildLabelIndex() {
+    const items = [];
+    const add = (o) => items.push(o);
+    for (const [name, lat, lon] of window.HH_PLACES.boroughs) add({ t: name.toUpperCase(), lat, lon, z0: 9, z1: 12.4, p: 100, k: "borough" });
+    const L2 = window.HH_LABELS || { areas: [], streets: [] };
+    for (const [name, lat, lon, n, central] of L2.areas) {
+      const z0 = central ? (central > 1 ? 11.6 : 12.4) : n >= 250 ? 11.6 : n >= 100 ? 12.2 : 12.8;
+      add({ t: name, lat, lon, z0, z1: 16.6, p: 80 + Math.min(15, n / 40) + (central ? 10 : 0), k: "area" });
+    }
+    for (const n of E.nodes) {
+      if (!n.station || !n.lines.length) continue;
+      const k = n.lines.length;
+      add({ t: n.name, lat: n.lat, lon: n.lon, z0: k >= 3 ? 12.4 : k === 2 ? 13 : 13.6, z1: 20, p: 60 + k * 4, k: "station" });
+    }
+    const vz = { park: [13.8, 15.4], museum: [14.6, 15.8], gallery: [15.6, 16.4], theatre: [15.4, 16.2], market: [15.2, 16], pub: [16, 16.6] };
+    for (const v of E.venues) {
+      const [hi, lo] = vz[v.type] || [16, 17];
+      add({ t: v.name, lat: v.lat, lon: v.lon, z0: v.q >= 6 ? hi : lo, z1: 20, p: 30 + v.q, k: v.type });
+    }
+    for (const [name, lat, lon, w] of L2.streets) add({ t: name, lat, lon, z0: w >= 3 ? 14.3 : w >= 2 ? 14.8 : 15.3, z1: 20, p: 10 + w, k: "street" });
+    const grid = new Map();
+    for (const it of items) {
+      const key = Math.floor(it.lat / 0.01) * 100000 + Math.floor(it.lon / 0.01);
+      if (!grid.has(key)) grid.set(key, []);
+      grid.get(key).push(it);
+    }
+    return { grid, count: items.length };
+  }
+
+  const LABEL_STYLE = {
+    borough: { size: 12, weight: 700, spacing: 2.2, colour: "--muted" },
+    area: { size: 14, weight: 700, colour: "--ink" },
+    station: { size: 11.5, weight: 600, colour: "--ink", dot: true },
+    street: { size: 10.5, weight: 500, colour: "--muted", italic: true },
+    park: { size: 11, weight: 600, colour: "--park" },
+    museum: { size: 11, weight: 600, colour: "--ink" },
+    gallery: { size: 11, weight: 600, colour: "--ink" },
+    theatre: { size: 11, weight: 600, colour: "--ink" },
+    market: { size: 11, weight: 600, colour: "--ink" },
+    pub: { size: 11, weight: 600, colour: "--brass" },
+  };
+
+  function drawLabels(ctx, m, size) {
+    if (!labelIndex) labelIndex = buildLabelIndex();
+    const z = m.getZoom();
+    const b = m.getBounds().pad(0.05);
+    const css = getComputedStyle(document.documentElement);
+    const halo = css.getPropertyValue("--surface").trim();
+    const font = css.getPropertyValue("--font-body").trim();
+    const cand = [];
+    for (let r = Math.floor(b.getSouth() / 0.01); r <= Math.floor(b.getNorth() / 0.01); r++) {
+      for (let c = Math.floor(b.getWest() / 0.01); c <= Math.floor(b.getEast() / 0.01); c++) {
+        const list = labelIndex.grid.get(r * 100000 + c);
+        if (!list) continue;
+        for (const it of list) if (z >= it.z0 && z <= it.z1) cand.push(it);
+      }
+    }
+    cand.sort((a, c2) => c2.p - a.p);
+    const placed = [];
+    const cell = 64;
+    const buckets = new Map();
+    const hits = (x0, y0, x1, y1) => {
+      for (let gx = Math.floor(x0 / cell); gx <= Math.floor(x1 / cell); gx++) {
+        for (let gy = Math.floor(y0 / cell); gy <= Math.floor(y1 / cell); gy++) {
+          const list = buckets.get(gx * 10000 + gy);
+          if (!list) continue;
+          for (const q of list) if (x0 < q[2] && x1 > q[0] && y0 < q[3] && y1 > q[1]) return true;
+        }
+      }
+      return false;
+    };
+    const mark = (rect) => {
+      for (let gx = Math.floor(rect[0] / cell); gx <= Math.floor(rect[2] / cell); gx++) {
+        for (let gy = Math.floor(rect[1] / cell); gy <= Math.floor(rect[3] / cell); gy++) {
+          const key = gx * 10000 + gy;
+          if (!buckets.has(key)) buckets.set(key, []);
+          buckets.get(key).push(rect);
+        }
+      }
+    };
+    ctx.textBaseline = "middle";
+    ctx.lineJoin = "round";
+    let drawnCount = 0;
+    for (const it of cand) {
+      if (drawnCount > 420) break;
+      const st = LABEL_STYLE[it.k] || LABEL_STYLE.museum;
+      const grow = it.k === "area" ? Math.max(0, Math.min(3, (z - 12) * 1.2)) : 0;
+      const px = st.size + grow;
+      ctx.font = `${st.italic ? "italic " : ""}${st.weight} ${px}px ${font}`;
+      if ("letterSpacing" in ctx) ctx.letterSpacing = st.spacing ? `${st.spacing}px` : "0px";
+      const pt = m.latLngToContainerPoint([it.lat, it.lon]);
+      const w = ctx.measureText(it.t).width;
+      const h = px + 2;
+      let x0 = st.dot ? pt.x + 7 : pt.x - w / 2;
+      const y0 = pt.y - h / 2;
+      const rect = [x0 - 3, y0 - 2, x0 + w + 3, y0 + h + 2];
+      if (st.dot) rect[0] = pt.x - 6;
+      if (rect[2] < 0 || rect[0] > size.x || rect[3] < 0 || rect[1] > size.y) continue;
+      if (hits(rect[0], rect[1], rect[2], rect[3])) continue;
+      mark(rect);
+      placed.push(it);
+      drawnCount++;
+      if (st.dot) {
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 3.6, 0, Math.PI * 2);
+        ctx.fillStyle = halo; ctx.fill();
+        ctx.lineWidth = 2; ctx.strokeStyle = css.getPropertyValue("--ink").trim(); ctx.stroke();
+      }
+      ctx.lineWidth = 3.5;
+      ctx.strokeStyle = halo;
+      ctx.strokeText(it.t, x0, pt.y);
+      ctx.fillStyle = css.getPropertyValue(st.colour).trim();
+      ctx.fillText(it.t, x0, pt.y);
+    }
+  }
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { drawNetwork(); if (map.hasLayer(labelLayer)) labelLayer._redraw(); });
+  new MutationObserver(() => { drawNetwork(); if (map.hasLayer(labelLayer)) labelLayer._redraw(); }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 
   const lineColour = (c) => (isDark() && c === "#000000" ? "#B9C0BC" : c);
 
@@ -1086,6 +1282,7 @@
 
   function drawMapResults() {
     heatLayer.clearLayers();
+    if (map.hasLayer(heatCanvas)) map.removeLayer(heatCanvas);
     crowLayer.clearLayers();
     venueLayer.clearLayers();
     venueMarkers.clear();
@@ -1124,38 +1321,87 @@
   }
 
   // Bands of "how much longer is the longest trip than at the fairest spot", drawn like isochrones.
+  // The ~60 m grid is resampled for every screen pixel after each move, so band edges stay smooth
+  // at any zoom, with a hairline contour at each edge.
   const HEAT_BANDS = [[3, 0.42], [8, 0.2]];
-  function drawHeat(fair) {
-    const n = fair.cells;
-    const scale = 6;
-    const W = n * scale;
-    const c = document.createElement("canvas");
-    c.width = W; c.height = W;
-    const ctx = c.getContext("2d");
-    const img = ctx.createImageData(W, W);
-    const best = fair.worst;
-    const v = fair.values;
-    const at = (r, col) => v[Math.max(0, Math.min(n - 1, r)) * n + Math.max(0, Math.min(n - 1, col))];
-    for (let y = 0; y < W; y++) {
-      // Canvas rows run north to south; grid rows run south to north.
-      const gr = (W - 1 - y) / scale - 0.5;
-      const r0 = Math.floor(gr), fr = gr - r0;
-      for (let x = 0; x < W; x++) {
-        const gc = x / scale - 0.5;
-        const c0 = Math.floor(gc), fc = gc - c0;
-        const val = (at(r0, c0) * (1 - fc) + at(r0, c0 + 1) * fc) * (1 - fr) + (at(r0 + 1, c0) * (1 - fc) + at(r0 + 1, c0 + 1) * fc) * fr;
-        const d = val - best;
-        const band = HEAT_BANDS.find(([limit]) => d <= limit);
-        if (!band) continue;
-        const i = (y * W + x) * 4;
-        img.data[i] = 196; img.data[i + 1] = 128; img.data[i + 2] = 24;
-        img.data[i + 3] = Math.round(band[1] * 255);
+  const HeatLayer = L.Layer.extend({
+    setData(fair) { this._fair = fair; if (this._map) this._redraw(); return this; },
+    onAdd(m) {
+      this._canvas = L.DomUtil.create("canvas", "hh-heat");
+      m.getPane("heat").appendChild(this._canvas);
+      m.on("moveend zoomend resize viewreset", this._redraw, this);
+      m.on("zoomstart", this._hide, this);
+      this._redraw();
+    },
+    onRemove(m) {
+      L.DomUtil.remove(this._canvas);
+      m.off("moveend zoomend resize viewreset", this._redraw, this);
+      m.off("zoomstart", this._hide, this);
+    },
+    _hide() { if (this._canvas) this._canvas.style.visibility = "hidden"; },
+    _redraw() {
+      const m = this._map, fair = this._fair;
+      if (!m || !fair) return;
+      const size = m.getSize();
+      const padX = Math.round(size.x * 0.25), padY = Math.round(size.y * 0.25);
+      const W = size.x + 2 * padX, H = size.y + 2 * padY;
+      const cv = this._canvas;
+      cv.width = W; cv.height = H;
+      cv.style.width = W + "px"; cv.style.height = H + "px";
+      L.DomUtil.setPosition(cv, m.containerPointToLayerPoint([-padX, -padY]));
+      cv.style.visibility = "visible";
+      const { nx, ny, values, box } = fair;
+      const best = fair.worst;
+      const latStep = (box.north - box.south) / ny, lonStep = (box.east - box.west) / nx;
+      // Grid coordinates of each pixel column and row (Mercator rows are not evenly spaced).
+      const gcs = new Float32Array(W), grs = new Float32Array(H);
+      for (let x = 0; x < W; x++) gcs[x] = (m.containerPointToLatLng([x - padX + 0.5, 0]).lng - box.west) / lonStep - 0.5;
+      for (let y = 0; y < H; y++) grs[y] = (m.containerPointToLatLng([0, y - padY + 0.5]).lat - box.south) / latStep - 0.5;
+      const V = new Float32Array(W * H).fill(NaN);
+      for (let y = 0; y < H; y++) {
+        const gr = grs[y];
+        if (gr < -0.5 || gr > ny - 0.5) continue;
+        const r0 = Math.max(0, Math.min(ny - 2, Math.floor(gr))), fr = Math.max(0, Math.min(1, gr - r0));
+        const rowA = r0 * nx, rowB = (r0 + 1) * nx;
+        for (let x = 0; x < W; x++) {
+          const gc = gcs[x];
+          if (gc < -0.5 || gc > nx - 0.5) continue;
+          const c0 = Math.max(0, Math.min(nx - 2, Math.floor(gc))), fc = Math.max(0, Math.min(1, gc - c0));
+          V[y * W + x] = (values[rowA + c0] * (1 - fc) + values[rowA + c0 + 1] * fc) * (1 - fr)
+            + (values[rowB + c0] * (1 - fc) + values[rowB + c0 + 1] * fc) * fr - best;
+        }
       }
-    }
-    ctx.putImageData(img, 0, 0);
-    L.imageOverlay(c.toDataURL(), [[fair.box.south, fair.box.west], [fair.box.north, fair.box.east]], { pane: "heat", opacity: 1, interactive: false, className: "heat-img" }).addTo(heatLayer);
+      const ctx = cv.getContext("2d");
+      const img = ctx.createImageData(W, H);
+      const data = img.data;
+      const [[e1, a1], [e2, a2]] = HEAT_BANDS;
+      const ramp = (z) => (z <= -0.5 ? 0 : z >= 0.5 ? 1 : z + 0.5);
+      for (let y = 1; y < H - 1; y++) {
+        for (let x = 1; x < W - 1; x++) {
+          const i = y * W + x;
+          const d = V[i];
+          if (!(d <= e2 + 2)) continue;
+          // Minutes per pixel here, so edges are anti-aliased to about one pixel.
+          const gx = (V[i + 1] - V[i - 1]) / 2, gy = (V[i + W] - V[i - W]) / 2;
+          const g = Math.max(0.004, Math.sqrt(gx * gx + gy * gy) || 0.004);
+          let a = a2 * ramp((e2 - d) / g) + (a1 - a2) * ramp((e1 - d) / g);
+          a += 0.5 * Math.max(0, 1 - Math.abs(d - e1) / (g * 0.9)) + 0.3 * Math.max(0, 1 - Math.abs(d - e2) / (g * 0.9));
+          if (a <= 0.003) continue;
+          const k = i * 4;
+          data[k] = 176; data[k + 1] = 108; data[k + 2] = 12;
+          data[k + 3] = Math.round(Math.min(0.8, a) * 255);
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+    },
+  });
+  const heatCanvas = new HeatLayer();
+
+  function drawHeat(fair) {
+    heatCanvas.setData(fair);
+    if (!map.hasLayer(heatCanvas)) heatCanvas.addTo(map);
     const legend = $("#heatLegend");
-    legend.innerHTML = `<b>Fairness shading</b><div class="heat-key">${HEAT_BANDS.map(([limit, a]) => `<span><i style="opacity:${(a / HEAT_BANDS[0][1]).toFixed(2)}"></i>${limit === 3 ? "Fairest" : `+${limit} min`}</span>`).join("")}</div><div class="heat-note">Longest trip ${fmtMins(best)} min at the fairest spot</div>`;
+    legend.innerHTML = `<b>Fairness shading</b><div class="heat-key">${HEAT_BANDS.map(([limit, a]) => `<span><i style="opacity:${(a / HEAT_BANDS[0][1]).toFixed(2)}"></i>${limit === 3 ? "Fairest" : `+${limit} min`}</span>`).join("")}</div><div class="heat-note">Longest trip ${fmtMins(fair.worst)} min at the fairest spot</div>`;
     legend.hidden = false;
   }
 
@@ -1260,5 +1506,5 @@
   boot();
 
   window.addEventListener("hashchange", () => { if (readHash()) boot(); });
-  window.HHApp = { state, recompute, select, E };
+  window.HHApp = { state, recompute, select, E, map };
 })();

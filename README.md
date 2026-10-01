@@ -20,7 +20,9 @@ straight from this repo.
   - *By transport*: the point where the longest journey is as short as possible.
     The map shades the areas within 3 and 8 minutes of that.
   The summary shows both, including how long the slowest trip to the crow-flies
-  point would take, which is often a lot longer.
+  point would take, which is often a lot longer. The shading comes from a grid
+  of roughly 60 m cells and is redrawn for every screen pixel, so the band edges
+  stay sharp at any zoom.
 - **Ranked suggestions.** Every venue of the chosen types is scored on everyone's
   journey time. *What counts as fair* sets the trade-off: "Nobody travels far"
   protects whoever is furthest out, "Least travel overall" minimises the total.
@@ -55,7 +57,9 @@ app has its own model of London's network (`docs/engine.js`):
    Buses are also used for whole journeys, modelled as walk, wait and ride, with
    a change for longer trips.
 4. **Every venue and grid point** then takes the quickest combination of those.
-   The fair point is found on a 64 x 64 grid over the area, refined around the best cell.
+   For the fair point, each station's arrival time is spread over a grid of
+   roughly 60 m cells (around 250 x 250 for a typical group, in about 0.1 s),
+   then the best cell is refined with exact journey times.
 
 The best few suggestions are then checked against TfL for real times, and
 reordered if TfL disagrees. Anything marked *Estimate* comes from the model;
@@ -70,13 +74,17 @@ reordered if TfL disagrees. Anything marked *Estimate* comes from the model;
 | Cafés, restaurants, bars, cinemas | OpenStreetMap, fetched live from Overpass around the fair spot | ODbL |
 | Postcode districts and sectors | ONS/OS Code-Point Open via [dwyl](https://github.com/dwyl/uk-postcodes-latitude-longitude-complete-csv) | OGL |
 | Borough outlines (fallback map) | ONS boundaries via [martinjc/UK-GeoJSON](https://github.com/martinjc/UK-GeoJSON) | OGL |
+| Street and neighbourhood names (fallback map) | OS Open Names via the [uk-address-lookup](https://www.npmjs.com/package/uk-address-lookup) package; central district names placed by hand | OGL |
 | Live journeys | [TfL Unified API](https://api.tfl.gov.uk) | TfL Open Data, powered by TfL |
 | Address search | [Photon](https://photon.komoot.io) and [postcodes.io](https://postcodes.io) | ODbL / OGL |
 | Map tiles | [OpenStreetMap](https://www.openstreetmap.org) standard tiles (same as Pub_gen) | ODbL, credited on the map |
 
-If map tiles can't load, the map falls back to its own drawing of the boroughs,
-the Thames and the rail lines. If TfL can't be reached, everything still works
-from the model.
+The map is OpenStreetMap's standard map. If those tiles can't load it tries a
+second OSM tile server (HOT, hosted by OSM France), and if that fails too it
+draws its own map: boroughs, the Thames and the rail lines, with place names that
+get more detailed as you zoom (boroughs, then districts and stations, then parks
+and museums, then every street and pub). If TfL can't be reached, everything
+still works from the model.
 
 ## Running it
 
@@ -87,10 +95,13 @@ npm run test:e2e     # desktop and phone browser test (npm i --no-save playwrigh
 npm run build        # rebuild docs/data from data/sources (Python 3.10+)
 ```
 
-To refresh the venues from a newer Pub_gen checkout:
+To refresh the venues from a newer Pub_gen checkout, or the street names from
+a newer OS Open Names release:
 
 ```bash
 python3 tools/build_data.py --pubgen ../Pub_gen
+npm pack uk-address-lookup && tar xzf uk-address-lookup-*.tgz
+python3 tools/build_data.py --os-names package/data/uk-address.json.gz
 ```
 
 ### Deploying

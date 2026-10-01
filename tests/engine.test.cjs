@@ -81,8 +81,25 @@ test("fair point beats the crow-flies point on the longest journey", () => {
   const crow = HHEngine.minEnclosingCircle(people);
   const crowWorst = Math.max(...fields.map((f) => E.travel(f, crow.lat, crow.lon).mins));
   assert.ok(fair.worst <= crowWorst + 1e-9);
-  assert.equal(fair.values.length, fair.cells * fair.cells);
+  assert.equal(fair.values.length, fair.nx * fair.ny);
+  assert.ok(fair.nx >= 150, `grid ${fair.nx}x${fair.ny}`);
   assert.ok(fair.worst < 40, `worst ${fair.worst}`);
+});
+
+test("time grid agrees with exact journey times", () => {
+  const A = station("Brixton");
+  const f = E.timeField({ lat: A.lat, lon: A.lon });
+  const box = { south: 51.45, north: 51.55, west: -0.2, east: -0.05 };
+  const nx = 120, ny = 90;
+  const T = E.timeRaster(f, box, nx, ny);
+  let worstErr = 0;
+  for (let k = 0; k < 400; k++) {
+    const r = (k * 37) % ny, c = (k * 53) % nx;
+    const lat = box.south + (r + 0.5) * (box.north - box.south) / ny;
+    const lon = box.west + (c + 0.5) * (box.east - box.west) / nx;
+    worstErr = Math.max(worstErr, Math.abs(T[r * nx + c] - E.travel(f, lat, lon).mins));
+  }
+  assert.ok(worstErr < 0.5, `max difference ${worstErr.toFixed(2)} min`);
 });
 
 test("ranking returns spread-out venues of every chosen type", () => {

@@ -49,6 +49,7 @@ async function run(browser, base, name, ctxOpts) {
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("https://api.tfl.gov.uk/**", (r) => r.fulfill({ status: 200, contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: JSON.stringify(fakeJourneys(r.request().url())) }));
   await page.route("https://tile.openstreetmap.org/**", (r) => r.abort());
+  await page.route("https://*.tile.openstreetmap.fr/**", (r) => r.abort());
   await page.route("https://photon.komoot.io/**", (r) => r.fulfill({ status: 200, contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: JSON.stringify({ features: [{ geometry: { coordinates: [-0.0877, 51.5055] }, properties: { name: "Borough Market", street: "Southwark Street", postcode: "SE1 1TL", district: "Southwark" } }] }) }));
   await page.route("https://api.postcodes.io/**", (r) => r.abort());
   await page.route("https://overpass-api.de/**", (r) => r.abort());
@@ -59,6 +60,8 @@ async function run(browser, base, name, ctxOpts) {
   const count = await page.locator(".venue").count();
   if (count < 5) throw new Error(`${name}: expected suggestions, got ${count}`);
   await page.waitForSelector(".venue .badge-live", { timeout: 10000 });
+  // Tiles are blocked here, so the labelled fallback map should take over.
+  await page.waitForFunction(() => !document.getElementById("mapNote").hidden && document.querySelector(".hh-labels"), null, { timeout: 15000 });
   if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${name}-results.png`) });
 
   await page.locator(".venue").first().click();

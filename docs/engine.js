@@ -416,43 +416,97 @@
     }
 
     /**
+     * Journey time from one person to the centre of every cell of a grid over `box`.
+     * Same rules as travel(), but computed by spreading each station's arrival time
+     * over the cells around it, which is fast enough for grids of 100k+ cells.
+     */
+    function timeRaster(field, box, nx, ny) {
+      const T = new Float32Array(nx * ny);
+      const lat0 = (box.south + box.north) / 2;
+      const kx = 111320 * Math.cos(rad(lat0)), ky = 110540;
+      const cw = ((box.east - box.west) / nx) * kx;
+      const ch = ((box.north - box.south) / ny) * ky;
+      const o = field.origin;
+      const ox = (o.lon - box.west) * kx, oy = (o.lat - box.south) * ky;
+      const useBus = field.modes.bus;
+      for (let r = 0; r < ny; r++) {
+        const dy = (r + 0.5) * ch - oy;
+        for (let c = 0; c < nx; c++) {
+          const dx = (c + 0.5) * cw - ox;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          let t = (d * WALK_DETOUR) / WALK_M_PER_MIN;
+          if (useBus && d > 700 && d <= BUS_MAX) { const b = busMins(d); if (b < t) t = b; }
+          T[r * nx + c] = t;
+        }
+      }
+      if (!field.modes.rail) return T;
+      const R = useBus ? STATION_BUS_MAX : STATION_WALK_MAX;
+      const R2 = R * R, W2 = STATION_WALK_MAX * STATION_WALK_MAX;
+      for (let s = 0; s < S; s++) {
+        const a = field.arrive[s];
+        if (a === Infinity) continue;
+        const sx = (nodes[s].lon - box.west) * kx, sy = (nodes[s].lat - box.south) * ky;
+        const c0 = Math.max(0, Math.floor((sx - R) / cw)), c1 = Math.min(nx - 1, Math.ceil((sx + R) / cw));
+        const r0 = Math.max(0, Math.floor((sy - R) / ch)), r1 = Math.min(ny - 1, Math.ceil((sy + R) / ch));
+        if (c0 > c1 || r0 > r1) continue;
+        for (let r = r0; r <= r1; r++) {
+          const dy = (r + 0.5) * ch - sy;
+          const dy2 = dy * dy;
+          if (dy2 > R2) continue;
+          const row = r * nx;
+          for (let c = c0; c <= c1; c++) {
+            const dx = (c + 0.5) * cw - sx;
+            const d2 = dx * dx + dy2;
+            if (d2 > R2) continue;
+            const d = Math.sqrt(d2);
+            let e = d2 <= W2 ? (d * WALK_DETOUR) / WALK_M_PER_MIN : Infinity;
+            if (useBus && d > 700) { const b = BUS_FIXED + (d * BUS_DETOUR) / BUS_M_PER_MIN; if (b < e) e = b; }
+            const t = a + e;
+            if (t < T[row + c]) T[row + c] = t;
+          }
+        }
+      }
+      return T;
+    }
+
+    /**
      * The point where the slowest journey is as short as possible: the fairest spot by transport.
-     * Also returns the grid of worst-journey times for a heat map.
+     * Also returns the grid of worst-journey times (about 60 m cells) for the shading.
      */
     function fairPoint(fields, opts) {
       const people = fields.map((f) => f.origin);
       const box = (opts && opts.box) || searchBox(people);
-      const cells = (opts && opts.cells) || 64;
-      const latStep = (box.north - box.south) / cells;
-      const lonStep = (box.east - box.west) / cells;
-      const values = new Float32Array(cells * cells);
-      let best = null;
-      for (let r = 0; r < cells; r++) {
-        const lat = box.south + (r + 0.5) * latStep;
-        for (let c = 0; c < cells; c++) {
-          const lon = box.west + (c + 0.5) * lonStep;
-          const times = fields.map((f) => travel(f, lat, lon).mins);
-          const worst = Math.max(...times);
-          values[r * cells + c] = worst;
-          const total = times.reduce((a, b) => a + b, 0);
-          if (!best || worst < best.worst - 1e-9 || (Math.abs(worst - best.worst) < 0.5 && total < best.total)) {
-            best = { lat, lon, times, worst, total };
-          }
+      const lat0 = (box.south + box.north) / 2;
+      const wM = (box.east - box.west) * 111320 * Math.cos(rad(lat0));
+      const hM = (box.north - box.south) * 110540;
+      const cellM = (opts && opts.cellM) || Math.max(55, Math.max(wM, hM) / 340);
+      const nx = Math.max(24, Math.round(wM / cellM)), ny = Math.max(24, Math.round(hM / cellM));
+      const rasters = fields.map((f) => timeRaster(f, box, nx, ny));
+      const values = new Float32Array(nx * ny);
+      let bestI = 0, bestWorst = Infinity, bestTotal = Infinity;
+      for (let i = 0; i < values.length; i++) {
+        let worst = 0, total = 0;
+        for (const T of rasters) { const t = T[i]; if (t > worst) worst = t; total += t; }
+        values[i] = worst;
+        if (worst < bestWorst - 1e-6 || (Math.abs(worst - bestWorst) < 0.5 && total < bestTotal)) {
+          bestI = i; bestWorst = worst; bestTotal = total;
         }
       }
-      // Refine around the winner on a finer grid.
-      const fine = 9;
-      const base = best;
+      const latStep = (box.north - box.south) / ny, lonStep = (box.east - box.west) / nx;
+      const base = { lat: box.south + (Math.floor(bestI / nx) + 0.5) * latStep, lon: box.west + ((bestI % nx) + 0.5) * lonStep };
+      // Confirm and refine with exact journey times around the winning cell.
+      let best = null;
+      const fine = 4;
       for (let r = -fine; r <= fine; r++) {
         for (let c = -fine; c <= fine; c++) {
           const lat = base.lat + (r / fine) * latStep, lon = base.lon + (c / fine) * lonStep;
           const times = fields.map((f) => travel(f, lat, lon).mins);
           const worst = Math.max(...times);
-          const total = times.reduce((a, b) => a + b, 0);
-          if (worst < best.worst - 1e-9 || (Math.abs(worst - best.worst) < 0.25 && total < best.total)) best = { lat, lon, times, worst, total };
+          const total = times.reduce((x, y) => x + y, 0);
+          if (!best || worst < best.worst - 1e-9 || (Math.abs(worst - best.worst) < 0.25 && total < best.total)) best = { lat, lon, times, worst, total };
         }
       }
-      return { lat: best.lat, lon: best.lon, times: best.times, worst: best.worst, box, cells, values };
+      return { lat: best.lat, lon: best.lon, times: best.times, worst: best.worst, box, nx, ny, values };
     }
 
     /**
@@ -495,7 +549,7 @@
 
     return {
       lines, nodes, venues, net,
-      geom, timeField, travel, route, fairPoint, rankVenues, score, searchBox, stationsNear, nearestStation,
+      geom, timeField, travel, route, timeRaster, fairPoint, rankVenues, score, searchBox, stationsNear, nearestStation,
     };
   }
 

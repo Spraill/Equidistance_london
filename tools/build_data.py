@@ -10,6 +10,7 @@ Outputs (plain scripts, so the site works from file:// and needs no fetch):
     docs/data/venues.js    pubs, parks, museums, galleries, markets, theatres
     docs/data/places.js    postcode districts/sectors and boroughs, for search
     docs/data/basemap.js   borough outlines and the Thames, drawn when map tiles can't load
+    docs/data/labels.js    neighbourhood and street names for that fallback map (OS Open Names)
 """
 
 from __future__ import annotations
@@ -641,6 +642,137 @@ def build_places_and_basemap() -> tuple[dict, dict]:
     return places, basemap
 
 
+# ---------------------------------------------------------------- map labels (OS Open Names)
+
+def osgb_to_wgs84(e: float, n: float) -> tuple[float, float]:
+    """OS National Grid easting/northing to WGS84 lat/lon (Helmert, accurate to a few metres)."""
+    a, b = 6377563.396, 6356256.909  # Airy 1830
+    f0, lat0, lon0, n0, e0 = 0.9996012717, math.radians(49), math.radians(-2), -100000, 400000
+    e2 = 1 - (b * b) / (a * a)
+    nn = (a - b) / (a + b)
+    lat, m = lat0, 0.0
+    while True:
+        lat = (n - n0 - m) / (a * f0) + lat
+        ma = (1 + nn + 1.25 * nn ** 2 + 1.25 * nn ** 3) * (lat - lat0)
+        mb = (3 * nn + 3 * nn ** 2 + 2.625 * nn ** 3) * math.sin(lat - lat0) * math.cos(lat + lat0)
+        mc = (1.875 * nn ** 2 + 1.875 * nn ** 3) * math.sin(2 * (lat - lat0)) * math.cos(2 * (lat + lat0))
+        md = (35 / 24) * nn ** 3 * math.sin(3 * (lat - lat0)) * math.cos(3 * (lat + lat0))
+        m = b * f0 * (ma - mb + mc - md)
+        if abs(n - n0 - m) < 0.00001:
+            break
+    sl, cl, tl = math.sin(lat), math.cos(lat), math.tan(lat)
+    nu = a * f0 / math.sqrt(1 - e2 * sl * sl)
+    rho = a * f0 * (1 - e2) / (1 - e2 * sl * sl) ** 1.5
+    eta2 = nu / rho - 1
+    vii = tl / (2 * rho * nu)
+    viii = tl / (24 * rho * nu ** 3) * (5 + 3 * tl ** 2 + eta2 - 9 * tl ** 2 * eta2)
+    ix = tl / (720 * rho * nu ** 5) * (61 + 90 * tl ** 2 + 45 * tl ** 4)
+    x_ = 1 / (cl * nu)
+    xi = 1 / (cl * 6 * nu ** 3) * (nu / rho + 2 * tl ** 2)
+    xii = 1 / (cl * 120 * nu ** 5) * (5 + 28 * tl ** 2 + 24 * tl ** 4)
+    xiia = 1 / (cl * 5040 * nu ** 7) * (61 + 662 * tl ** 2 + 1320 * tl ** 4 + 720 * tl ** 6)
+    de = e - e0
+    lat1 = lat - vii * de ** 2 + viii * de ** 4 - ix * de ** 6
+    lon1 = lon0 + x_ * de - xi * de ** 3 + xii * de ** 5 - xiia * de ** 7
+    # OSGB36 -> WGS84 via cartesian Helmert.
+    s1, c1, s2, c2 = math.sin(lat1), math.cos(lat1), math.sin(lon1), math.cos(lon1)
+    nu1 = a / math.sqrt(1 - e2 * s1 * s1)
+    x, y, z = nu1 * c1 * c2, nu1 * c1 * s2, (1 - e2) * nu1 * s1
+    tx, ty, tz, sc = 446.448, -125.157, 542.060, -20.4894e-6
+    rx, ry, rz = (math.radians(v / 3600) for v in (0.1502, 0.2470, 0.8421))
+    x2 = tx + (1 + sc) * x - rz * y + ry * z
+    y2 = ty + rz * x + (1 + sc) * y - rx * z
+    z2 = tz - ry * x + rx * y + (1 + sc) * z
+    a2, b2 = 6378137.0, 6356752.3142
+    e22 = 1 - (b2 * b2) / (a2 * a2)
+    p = math.hypot(x2, y2)
+    lat2 = math.atan2(z2, p * (1 - e22))
+    for _ in range(10):
+        nu2 = a2 / math.sqrt(1 - e22 * math.sin(lat2) ** 2)
+        lat2 = math.atan2(z2 + e22 * nu2 * math.sin(lat2), p)
+    return math.degrees(lat2), math.degrees(math.atan2(y2, x2))
+
+
+def names_from_os(bundle_path: Path) -> dict:
+    """Neighbourhood and street name points for London from OS Open Names (via the
+    uk-address-lookup npm package's bundle: streets are [name, town, district, region,
+    country, easting, northing])."""
+    import gzip
+    data = json.loads(gzip.open(bundle_path).read())
+    london = data["regions"].index("London")
+    towns = data["towns"]
+    streets = [s for s in data["streets"] if s[3] == london]
+    by_town = defaultdict(list)
+    segs = defaultdict(int)
+    for s in streets:
+        by_town[s[1]].append((s[5], s[6]))
+        segs[(s[0], s[1])] += 1
+    areas = []
+    for t, pts in by_town.items():
+        name = towns[t]
+        if name in ("London", "City of Westminster", "City of London") or len(pts) < 25:
+            continue
+        pts.sort()
+        e = sorted(p[0] for p in pts)[len(pts) // 2]
+        n = sorted(p[1] for p in pts)[len(pts) // 2]
+        lat, lon = osgb_to_wgs84(e, n)
+        areas.append([name, round(lat, 4), round(lon, 4), len(pts)])
+    out_streets = []
+    seen = defaultdict(list)
+    for s in streets:
+        name = s[0]
+        if re.fullmatch(r"[ABM]\d+(\(M\))?", name):
+            continue
+        lat, lon = osgb_to_wgs84(s[5], s[6])
+        if any(haversine(lat, lon, a, b) < 160 for a, b in seen[name]):
+            continue
+        seen[name].append((lat, lon))
+        out_streets.append([name, round(lat, 5), round(lon, 5), min(9, segs[(s[0], s[1])])])
+    out_streets.sort(key=lambda r: (r[1], r[2]))
+    areas.sort(key=lambda r: -r[3])
+    return {"areas": areas, "streets": out_streets}
+
+
+# OS Open Names files most inner-London streets under plain "London", so central districts
+# have no populated-place name. These are hand-placed at each district's usual centre
+# (2 = shown from further out). Positions are approximate, for map labels only.
+CENTRAL_AREAS = [
+    ("Soho", 51.5136, -0.1340, 2), ("Mayfair", 51.5095, -0.1475, 2), ("Marylebone", 51.5205, -0.1525, 2),
+    ("Fitzrovia", 51.5195, -0.1375, 1), ("Bloomsbury", 51.5215, -0.1250, 2), ("Covent Garden", 51.5120, -0.1235, 2),
+    ("Holborn", 51.5180, -0.1180, 1), ("Clerkenwell", 51.5240, -0.1050, 2), ("Shoreditch", 51.5265, -0.0790, 2),
+    ("Spitalfields", 51.5195, -0.0750, 1), ("Whitechapel", 51.5165, -0.0610, 2), ("Bankside", 51.5070, -0.0985, 1),
+    ("Borough", 51.5025, -0.0915, 1), ("Bermondsey", 51.4975, -0.0710, 2), ("Waterloo", 51.5035, -0.1135, 1),
+    ("Vauxhall", 51.4855, -0.1235, 1), ("Pimlico", 51.4895, -0.1385, 2), ("Belgravia", 51.4980, -0.1545, 2),
+    ("Knightsbridge", 51.5005, -0.1640, 1), ("Chelsea", 51.4875, -0.1690, 2), ("Notting Hill", 51.5125, -0.2045, 2),
+    ("Bayswater", 51.5120, -0.1880, 1), ("Paddington", 51.5170, -0.1760, 1), ("St John's Wood", 51.5335, -0.1735, 1),
+    ("Camden Town", 51.5395, -0.1425, 2), ("Kentish Town", 51.5505, -0.1410, 1), ("Islington", 51.5375, -0.1025, 2),
+    ("King's Cross", 51.5320, -0.1235, 1), ("Hoxton", 51.5315, -0.0815, 1), ("Dalston", 51.5465, -0.0750, 2),
+    ("Bethnal Green", 51.5270, -0.0560, 2), ("Mile End", 51.5250, -0.0335, 1), ("Bow", 51.5290, -0.0200, 1),
+    ("Limehouse", 51.5125, -0.0390, 1), ("Wapping", 51.5045, -0.0590, 1), ("Canary Wharf", 51.5045, -0.0195, 2),
+    ("Rotherhithe", 51.4990, -0.0500, 1), ("Peckham", 51.4730, -0.0690, 2), ("Camberwell", 51.4740, -0.0925, 2),
+    ("Brixton", 51.4615, -0.1150, 2), ("Clapham", 51.4620, -0.1385, 2), ("Battersea", 51.4740, -0.1560, 2),
+    ("Stockwell", 51.4720, -0.1225, 1), ("Kennington", 51.4880, -0.1060, 1), ("Elephant and Castle", 51.4950, -0.1000, 1),
+    ("Deptford", 51.4790, -0.0260, 1), ("Greenwich", 51.4805, -0.0090, 2), ("New Cross", 51.4760, -0.0330, 1),
+    ("Hackney", 51.5450, -0.0555, 2), ("Stoke Newington", 51.5620, -0.0790, 1), ("Highbury", 51.5520, -0.0975, 1),
+    ("Holloway", 51.5575, -0.1180, 1), ("Highgate", 51.5715, -0.1460, 1), ("Primrose Hill", 51.5400, -0.1600, 1),
+    ("Kilburn", 51.5440, -0.1945, 1), ("Maida Vale", 51.5290, -0.1855, 1), ("Shepherd's Bush", 51.5050, -0.2235, 2),
+    ("Hammersmith", 51.4925, -0.2245, 2), ("Putney", 51.4610, -0.2165, 2), ("Wandsworth", 51.4570, -0.1925, 1),
+    ("Tooting", 51.4275, -0.1680, 2), ("Balham", 51.4430, -0.1530, 1), ("Stratford", 51.5415, -0.0030, 2),
+    ("Westminster", 51.4995, -0.1335, 2), ("The City", 51.5150, -0.0920, 2), ("Aldgate", 51.5140, -0.0755, 1),
+    ("Southwark", 51.5030, -0.1040, 1), ("Lambeth", 51.4960, -0.1170, 1), ("Euston", 51.5275, -0.1335, 1),
+]
+
+
+def build_labels(net: dict, places: dict) -> dict:
+    names = json.loads((SOURCES / "london_names.json").read_text())
+    areas = [[name, lat, lon, 0, level] for name, lat, lon, level in CENTRAL_AREAS]
+    for name, lat, lon, count in names["areas"]:
+        if any(name == a[0] or haversine(lat, lon, a[1], a[2]) < 500 for a in areas):
+            continue
+        areas.append([name, lat, lon, count, 0])
+    return {"areas": areas, "streets": names["streets"]}
+
+
 # ---------------------------------------------------------------- main
 
 def write_js(name: str, var: str, payload: dict) -> int:
@@ -652,7 +784,17 @@ def write_js(name: str, var: str, payload: dict) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--pubgen", type=Path, help="path to a Pub_gen checkout, to refresh data/sources/venues.json")
+    parser.add_argument("--os-names", type=Path,
+                        help="uk-address-lookup's data/uk-address.json.gz, to refresh data/sources/london_names.json")
     args = parser.parse_args()
+
+    if args.os_names:
+        names = names_from_os(args.os_names)
+        (SOURCES / "london_names.json").write_text(
+            '{"areas":[\n' + ",\n".join(json.dumps(r, ensure_ascii=False) for r in names["areas"]) + '\n],"streets":[\n'
+            + ",\n".join(json.dumps(r, ensure_ascii=False, separators=(",", ":")) for r in names["streets"]) + "\n]}\n",
+            encoding="utf-8")
+        print(f"london_names.json: {len(names['areas'])} areas, {len(names['streets'])} streets from {args.os_names}")
 
     if args.pubgen:
         venues = venues_from_pubgen(args.pubgen)
@@ -682,6 +824,9 @@ def main() -> int:
     print(f"places.js: {len(places['postcodes'])} postcodes, {len(places['boroughs'])} boroughs, {size // 1024} KB")
     size = write_js("basemap.js", "HH_BASEMAP", basemap)
     print(f"basemap.js: {len(basemap['thames'])} river pieces, {size // 1024} KB")
+    labels = build_labels(net, places)
+    size = write_js("labels.js", "HH_LABELS", labels)
+    print(f"labels.js: {len(labels['areas'])} areas, {len(labels['streets'])} streets, {size // 1024} KB")
     return 0
 
 
