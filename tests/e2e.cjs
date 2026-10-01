@@ -48,7 +48,7 @@ async function run(browser, base, name, ctxOpts) {
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("https://api.tfl.gov.uk/**", (r) => r.fulfill({ status: 200, contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: JSON.stringify(fakeJourneys(r.request().url())) }));
-  await page.route("https://*.basemaps.cartocdn.com/**", (r) => r.abort());
+  await page.route("https://tile.openstreetmap.org/**", (r) => r.abort());
   await page.route("https://photon.komoot.io/**", (r) => r.fulfill({ status: 200, contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: JSON.stringify({ features: [{ geometry: { coordinates: [-0.0877, 51.5055] }, properties: { name: "Borough Market", street: "Southwark Street", postcode: "SE1 1TL", district: "Southwark" } }] }) }));
   await page.route("https://api.postcodes.io/**", (r) => r.abort());
   await page.route("https://overpass-api.de/**", (r) => r.abort());

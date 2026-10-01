@@ -72,7 +72,7 @@ reordered if TfL disagrees. Anything marked *Estimate* comes from the model;
 | Borough outlines (fallback map) | ONS boundaries via [martinjc/UK-GeoJSON](https://github.com/martinjc/UK-GeoJSON) | OGL |
 | Live journeys | [TfL Unified API](https://api.tfl.gov.uk) | TfL Open Data, powered by TfL |
 | Address search | [Photon](https://photon.komoot.io) and [postcodes.io](https://postcodes.io) | ODbL / OGL |
-| Map tiles | CARTO basemaps on OpenStreetMap | attribution in the map |
+| Map tiles | [OpenStreetMap](https://www.openstreetmap.org) standard tiles (same as Pub_gen) | ODbL, credited on the map |
 
 If map tiles can't load, the map falls back to its own drawing of the boroughs,
 the Thames and the rail lines. If TfL can't be reached, everything still works

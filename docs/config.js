@@ -4,12 +4,11 @@ window.HH_CONFIG = {
   // https://api-portal.tfl.gov.uk to raise the limit, and paste it here.
   tflAppKey: "",
   tflBase: "https://api.tfl.gov.uk",
-  // Map tiles (CARTO basemaps, free for low-volume use with attribution).
-  tiles: {
-    light: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
-    dark: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
-  },
+  // Map tiles: the standard OpenStreetMap map, as used by Pub_gen. No key needed.
+  // Follow https://operations.osmfoundation.org/policies/tiles/ and move to a
+  // commercial or self-hosted tile server if traffic grows.
+  tileUrl: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+  tileAttribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
   photonUrl: "https://photon.komoot.io/api/",
   postcodesUrl: "https://api.postcodes.io/postcodes/",
   overpassUrls: ["https://overpass-api.de/api/interpreter", "https://overpass.private.coffee/api/interpreter"],

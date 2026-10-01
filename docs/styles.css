@@ -602,7 +602,12 @@ a { color: var(--accent); }
 .leaflet-bar a { background: var(--surface); color: var(--ink); border-color: var(--line); }
 .leaflet-bar a:hover { background: var(--surface-2); }
 .leaflet-control-zoom { border: 1px solid var(--line) !important; box-shadow: var(--shadow) !important; }
-.dark-tiles { filter: none; }
+/* OpenStreetMap tiles, toned down so routes and line colours read on top; inverted for dark mode. */
+.leaflet-tile-pane { filter: saturate(0.72) contrast(0.96); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.88) saturate(0.55); }
+}
+:root[data-theme="dark"] .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.88) saturate(0.55); }
 .basemap-land { fill: var(--land); }
 
 .pm {

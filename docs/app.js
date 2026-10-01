@@ -163,16 +163,13 @@
     const t = document.documentElement.getAttribute("data-theme");
     return t ? t === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
   };
-  let tiles = null;
-  function setTiles() {
-    if (tiles) map.removeLayer(tiles);
-    const t = CFG.tiles || {};
-    tiles = L.tileLayer(isDark() ? t.dark : t.light, { subdomains: "abcd", maxZoom: 19, attribution: t.attribution }).addTo(map);
-    tiles.bringToBack();
-  }
-  setTiles();
-  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { setTiles(); drawNetwork(); });
-  new MutationObserver(() => { setTiles(); drawNetwork(); }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  // OpenStreetMap's standard tiles; dark mode is a CSS filter on the tile pane (see styles.css).
+  L.tileLayer(CFG.tileUrl || "https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: CFG.tileAttribution || '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  }).addTo(map);
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => drawNetwork());
+  new MutationObserver(() => drawNetwork()).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 
   const lineColour = (c) => (isDark() && c === "#000000" ? "#B9C0BC" : c);
 
