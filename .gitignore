@@ -1,0 +1,4 @@
+node_modules/
+screenshots/
+__pycache__/
+.DS_Store

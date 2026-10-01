@@ -1,0 +1,10 @@
+{
+  "name": "Halfway House",
+  "short_name": "Halfway",
+  "description": "Find a fair place to meet in London.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#EDEFEA",
+  "theme_color": "#0E5C47",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
